@@ -19,3 +19,6 @@ Thumbs.db
 
 # Streamlit cache
 .streamlit/secrets.toml
+
+# Local user data — do not commit
+saved_sessions.json
