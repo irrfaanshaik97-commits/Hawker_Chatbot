@@ -10,8 +10,13 @@ openai_service.py. All persistence lives in storage.py.
 
 import streamlit as st
 
-from openai_service import create_chat_session, send_message
-from storage import load_sessions, save_sessions
+from openai_service import (
+    create_chat_session,
+    send_message,
+    generate_tagline,
+    parse_dish_blocks,
+)
+from storage import load_bookmarks, save_bookmarks
 
 
 # -----------------------------------------------------------------------------
@@ -34,69 +39,84 @@ def initialize_session_state():
         st.session_state.chat_history = create_chat_session()
     if "display_messages" not in st.session_state:
         st.session_state.display_messages = []
-    if "saved_sessions" not in st.session_state:
-        st.session_state.saved_sessions = load_sessions()
-    if "viewing_index" not in st.session_state:
-        st.session_state.viewing_index = None
+    if "bookmarks" not in st.session_state:
+        st.session_state.bookmarks = load_bookmarks()
 
 
 def reset_conversation():
-    """Wipe the LIVE conversation. Does not touch saved sessions."""
+    """Wipe the live conversation. Does not touch bookmarks."""
     st.session_state.chat_history = create_chat_session()
     st.session_state.display_messages = []
 
 
-def truncate(text: str, max_length: int = 50) -> str:
-    """Shorten text to max_length chars, adding an ellipsis if cut."""
-    text = text.strip()
-    if len(text) <= max_length:
-        return text
-    return text[:max_length].rstrip() + "…"
+def find_preceding_user_message(messages: list, assistant_index: int) -> str:
+    """Find the most recent user message before the given assistant index."""
+    for i in range(assistant_index - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            return messages[i]["content"]
+    return ""
 
 
-def get_user_questions() -> list[str]:
-    """Return only the user messages from the live display history."""
-    return [
-        m["content"]
-        for m in st.session_state.display_messages
-        if m["role"] == "user"
-    ]
+def add_bookmark(dish_name: str, dish_block: str, user_message: str):
+    """Create a bookmark from a dish, persist it, and notify the user."""
+    # Dedup: skip if the same dish was already bookmarked from the same question.
+    for b in st.session_state.bookmarks:
+        if b["dish_name"] == dish_name and b["original_question"] == user_message:
+            st.toast(f"'{dish_name}' is already bookmarked.", icon="ℹ️")
+            return
 
+    tagline = generate_tagline(user_message)
 
-def make_session_label(display_messages: list, max_length: int = 40) -> str:
-    """Build a sidebar label from the first user question in a session."""
-    for m in display_messages:
-        if m["role"] == "user":
-            return truncate(m["content"], max_length)
-    return "Untitled session"
-
-
-def archive_current_chat():
-    """Archive the live chat into saved sessions, then reset for a new chat."""
-    if not st.session_state.display_messages:
-        st.toast("Nothing to clear yet.", icon="💬")
-        return
-
-    session = {
-        "label": make_session_label(st.session_state.display_messages),
-        "display_messages": st.session_state.display_messages.copy(),
+    bookmark = {
+        "tagline": tagline,
+        "dish_name": dish_name,
+        "dish_block": dish_block,
+        "original_question": user_message,
     }
-    st.session_state.saved_sessions.insert(0, session)
+    st.session_state.bookmarks.append(bookmark)
 
-    if not save_sessions(st.session_state.saved_sessions):
-        st.toast("Could not save the session to disk.", icon="⚠️")
-
-    reset_conversation()
-
-
-def view_saved_session(index: int):
-    """Enter Viewing mode for a saved session."""
-    st.session_state.viewing_index = index
+    if save_bookmarks(st.session_state.bookmarks):
+        st.toast(f"Bookmarked '{dish_name}'", icon="🔖")
+    else:
+        st.toast("Bookmarked, but couldn't save to disk.", icon="⚠️")
 
 
-def return_to_live():
-    """Exit Viewing mode and return to the live chat."""
-    st.session_state.viewing_index = None
+def remove_bookmark(index: int):
+    """Remove a bookmark by index and persist the change."""
+    if 0 <= index < len(st.session_state.bookmarks):
+        removed = st.session_state.bookmarks.pop(index)
+        save_bookmarks(st.session_state.bookmarks)
+        st.toast(f"Removed '{removed['dish_name']}'", icon="🗑️")
+
+
+def render_assistant_message_with_bookmarks(message: dict, message_index: int):
+    """Render an assistant message and bookmark buttons for each dish."""
+    with st.chat_message("assistant"):
+        st.markdown(message["content"])
+
+        dishes = parse_dish_blocks(message["content"])
+
+        if dishes:
+            user_message = find_preceding_user_message(
+                st.session_state.display_messages, message_index
+            )
+            st.caption("Bookmark a recommendation:")
+
+            cols = st.columns(min(len(dishes), 3))
+            for i, dish in enumerate(dishes):
+                col = cols[i % len(cols)]
+                with col:
+                    if st.button(
+                        f"🔖 {dish['name']}",
+                        key=f"bookmark_{message_index}_{i}",
+                        use_container_width=True,
+                    ):
+                        add_bookmark(
+                            dish_name=dish["name"],
+                            dish_block=dish["block"],
+                            user_message=user_message,
+                        )
+                        st.rerun()
 
 
 # -----------------------------------------------------------------------------
@@ -110,47 +130,40 @@ st.caption(
 
 
 # -----------------------------------------------------------------------------
-# Initialize session state (must run before sidebar reads from it).
+# Initialize session state.
 # -----------------------------------------------------------------------------
 initialize_session_state()
 
 
 # -----------------------------------------------------------------------------
-# Sidebar — controls, history, saved sessions, and about info.
+# Sidebar — controls, bookmarks, and about info.
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Controls")
 
     if st.button("🗑️ Clear Chat", use_container_width=True):
-        archive_current_chat()
+        reset_conversation()
         st.rerun()
 
     st.divider()
 
-    # --- Current session questions ---
-    st.header("💬 Your Questions")
-    questions = get_user_questions()
-    if not questions:
-        st.caption("Your questions will appear here as we chat.")
-    else:
-        for i, question in enumerate(questions, start=1):
-            st.markdown(f"**{i}.** {truncate(question)}")
+    # --- Bookmarks ---
+    st.header("🔖 Bookmarks")
 
-    st.divider()
-
-    # --- Saved sessions ---
-    st.header("📚 Saved Sessions")
-    if not st.session_state.saved_sessions:
-        st.caption("Cleared chats will be saved here.")
+    if not st.session_state.bookmarks:
+        st.caption("Bookmark a dish from the chat to save it here.")
     else:
-        for i, session in enumerate(st.session_state.saved_sessions):
-            if st.button(
-                f"📄 {session['label']}",
-                key=f"saved_session_{i}",
-                use_container_width=True,
-            ):
-                view_saved_session(i)
-                st.rerun()
+        for i, bookmark in enumerate(st.session_state.bookmarks):
+            with st.expander(f"📍 {bookmark['tagline']}"):
+                st.markdown(f"**{bookmark['dish_name']}**")
+                st.markdown(bookmark["dish_block"])
+                if st.button(
+                    "Remove",
+                    key=f"remove_bookmark_{i}",
+                    use_container_width=True,
+                ):
+                    remove_bookmark(i)
+                    st.rerun()
 
     st.divider()
 
@@ -163,75 +176,65 @@ with st.sidebar:
 
 
 # -----------------------------------------------------------------------------
-# Main area — Live chat OR archived session, depending on mode.
+# Main chat area
 # -----------------------------------------------------------------------------
-if st.session_state.viewing_index is not None:
-    # ===== Viewing mode (read-only) =====
-    session = st.session_state.saved_sessions[st.session_state.viewing_index]
+if not st.session_state.display_messages:
+    with st.chat_message("assistant"):
+        st.markdown(
+            "👋 Hi! I'm **MakanBot**, your Singapore hawker food guide.\n\n"
+            "Tell me what you're craving, and I'll point you to a "
+            "great hawker dish. You can mention:\n"
+            "- 🌶️ A flavor or mood (*spicy, soupy, sweet*)\n"
+            "- 📍 An MRT station or area (*Bugis, Tiong Bahru*)\n"
+            "- 🥦 Dietary needs (*halal, vegetarian, no pork*)\n\n"
+            "**Try one of these to start:**"
+        )
+        st.markdown(
+            "- *I want something spicy near Bugis MRT.*\n"
+            "- *Recommend a vegetarian dish in Chinatown.*\n"
+            "- *Halal soupy noodles, please.*"
+        )
+else:
+    # Render every past message. Assistant messages get bookmark buttons.
+    for idx, message in enumerate(st.session_state.display_messages):
+        if message["role"] == "user":
+            with st.chat_message("user"):
+                st.markdown(message["content"])
+        else:
+            render_assistant_message_with_bookmarks(message, idx)
 
-    st.info(
-        f"📖 Viewing a saved session: **{session['label']}** (read-only)"
+
+# -----------------------------------------------------------------------------
+# Chat input
+# -----------------------------------------------------------------------------
+user_input = st.chat_input("What are you craving today?")
+
+if user_input:
+    cleaned_input = user_input.strip()
+    if not cleaned_input:
+        st.toast("Please type a message before sending.", icon="✍️")
+        st.stop()
+
+    with st.chat_message("user"):
+        st.markdown(cleaned_input)
+
+    st.session_state.display_messages.append(
+        {"role": "user", "content": cleaned_input}
     )
 
-    if st.button("↩ Back to Live Chat"):
-        return_to_live()
-        st.rerun()
-
-    for message in session["display_messages"]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # No st.chat_input here — input is intentionally disabled in Viewing mode.
-
-else:
-    # ===== Live mode =====
-    if not st.session_state.display_messages:
-        with st.chat_message("assistant"):
-            st.markdown(
-                "👋 Hi! I'm **MakanBot**, your Singapore hawker food guide.\n\n"
-                "Tell me what you're craving, and I'll point you to a "
-                "great hawker dish. You can mention:\n"
-                "- 🌶️ A flavor or mood (*spicy, soupy, sweet*)\n"
-                "- 📍 An MRT station or area (*Bugis, Tiong Bahru*)\n"
-                "- 🥦 Dietary needs (*halal, vegetarian, no pork*)\n\n"
-                "**Try one of these to start:**"
+    with st.chat_message("assistant"):
+        with st.spinner("MakanBot is thinking..."):
+            result = send_message(
+                st.session_state.chat_history, cleaned_input
             )
-            st.markdown(
-                "- *I want something spicy near Bugis MRT.*\n"
-                "- *Recommend a vegetarian dish in Chinatown.*\n"
-                "- *Halal soupy noodles, please.*"
+
+        if result["success"]:
+            st.markdown(result["text"])
+            st.session_state.display_messages.append(
+                {"role": "assistant", "content": result["text"]}
             )
-    else:
-        for message in st.session_state.display_messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-    # --- Live chat input ---
-    user_input = st.chat_input("What are you craving today?")
-
-    if user_input:
-        cleaned_input = user_input.strip()
-        if not cleaned_input:
-            st.toast("Please type a message before sending.", icon="✍️")
-            st.stop()
-
-        with st.chat_message("user"):
-            st.markdown(cleaned_input)
-
-        st.session_state.display_messages.append(
-            {"role": "user", "content": cleaned_input}
-        )
-
-        with st.chat_message("assistant"):
-            with st.spinner("MakanBot is thinking..."):
-                result = send_message(
-                    st.session_state.chat_history, cleaned_input
-                )
-
-            if result["success"]:
-                st.markdown(result["text"])
-                st.session_state.display_messages.append(
-                    {"role": "assistant", "content": result["text"]}
-                )
-            else:
-                st.error(result["error"])
+            # Trigger a rerun so the bookmark buttons appear for this
+            # newly-added message via the normal rendering loop above.
+            st.rerun()
+        else:
+            st.error(result["error"])

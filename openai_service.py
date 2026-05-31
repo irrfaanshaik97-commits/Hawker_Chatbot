@@ -160,3 +160,91 @@ def send_message(messages: list, user_message: str) -> dict:
                 "Something went wrong. Please try again."
             ),
         }
+    
+    
+# =============================================================================
+# Bookmark support functions
+# =============================================================================
+
+# A focused mini-prompt for generating tag lines. Kept short to minimize cost.
+TAGLINE_SYSTEM_PROMPT = (
+    "You write very short tag lines summarizing a user's food request. "
+    "Output ONLY the tag line — no quotes, no preamble, no full sentences. "
+    "Include only key facts: location, flavor/mood, dietary needs. "
+    "Maximum 10 words, comma-separated. "
+    "Example input: 'I want something spicy near Bedok MRT, not too oily, no pork please.' "
+    "Example output: Bedok MRT, spicy, less oily, no pork"
+)
+
+
+def generate_tagline(user_message: str) -> str:
+    """
+    Use OpenAI to compress the user's last question into a short tag line.
+    Falls back to a truncated raw message if the API call fails — we never
+    want bookmarking to fail because of a summarization hiccup.
+    """
+    # Build a fallback up front so any failure path has something to return.
+    fallback = user_message.strip()
+    if len(fallback) > 60:
+        fallback = fallback[:60].rstrip() + "…"
+
+    if not user_message or not user_message.strip():
+        return fallback
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": TAGLINE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            # Keep the summary short and deterministic.
+            max_tokens=40,
+            temperature=0.3,
+        )
+        tagline = response.choices[0].message.content
+        if tagline:
+            return tagline.strip().strip('"').strip("'")
+        return fallback
+    except Exception:
+        # Any failure (network, API, parse) — just use the fallback.
+        return fallback
+
+
+def parse_dish_blocks(response_text: str) -> list[dict]:
+    """
+    Split a bot response into individual dish blocks.
+
+    Looks for lines starting with '**Dish Name**' (Markdown bold) and
+    treats each as the start of a dish block. Each block runs from its
+    header until the next header or the end of the text.
+
+    Returns a list of dicts: [{"name": "...", "block": "..."}, ...]
+    If no dish headers are found, returns an empty list — the caller can
+    handle that case (e.g., offer to bookmark the whole response).
+    """
+    import re
+
+    if not response_text:
+        return []
+
+    # Find each occurrence of '**Something**' that appears at the start
+    # of a line (with optional whitespace). Capture both the name and
+    # the position so we can slice the original text between matches.
+    pattern = re.compile(r"^\s*\*\*([^*\n]+)\*\*", re.MULTILINE)
+    matches = list(pattern.finditer(response_text))
+
+    if not matches:
+        return []
+
+    dishes = []
+    for i, match in enumerate(matches):
+        # Block starts at this match, ends at the next match (or EOF).
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(response_text)
+        block = response_text[start:end].strip()
+        name = match.group(1).strip()
+        dishes.append({"name": name, "block": block})
+
+    return dishes
