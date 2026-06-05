@@ -126,7 +126,7 @@ AI-generated tag line like *"Bugis, spicy, non-halal"* so you can find
 it again later.
 
 ---
-
+```
 ## Project Structure
 hawker-chatbot/
 ├── app.py                  # Streamlit UI and session state
@@ -138,7 +138,7 @@ hawker-chatbot/
 ├── .env.example            # Template for required environment variables
 ├── .gitignore              # Protects secrets and local data
 └── README.md               # This file
-
+```
 ---
 
 ## Known Limitations
